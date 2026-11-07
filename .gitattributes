@@ -1,0 +1,5 @@
+dist/*.TXT  text eol=crlf
+dist/*.INI  text eol=crlf
+*.dll binary
+*.exe binary
+*.EXE binary
