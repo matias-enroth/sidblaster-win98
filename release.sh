@@ -14,8 +14,8 @@ rm -f build/HardSID.dll build/SBTEST.EXE
 OK='ADVAPI32.dll KERNEL32.dll USER32.dll
 RegCloseKey RegEnumKeyExA RegOpenKeyExA RegQueryValueExA
 CloseHandle CreateEventA CreateFileA CreateThread DisableThreadLibraryCalls
-EnterCriticalSection ExitProcess GetCommState GetCommandLineA GetLastError
-GetModuleFileNameA GetPrivateProfileIntA GetPrivateProfileStringA GetStdHandle
+EnterCriticalSection ExitProcess GetCommState GetCommandLineA GetCurrentThreadId GetLastError
+GetModuleFileNameA GetPrivateProfileIntA GetPrivateProfileStringA GetProcAddress GetStdHandle
 GetTickCount InitializeCriticalSection LeaveCriticalSection LoadLibraryA PurgeComm
 QueryPerformanceCounter QueryPerformanceFrequency ReadFile SetCommState
 SetCommTimeouts SetEvent SetFilePointer SetThreadPriority SetupComm Sleep

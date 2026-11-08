@@ -8,7 +8,7 @@ void *memset(void *d, int c, unsigned int n)
 void *memcpy(void *d, const void *s, unsigned int n)
 { unsigned char *p = d; const unsigned char *q = s; while (n--) *p++ = *q++; return d; }
 
-#define SB_VERSION   "1.0"
+#define SB_VERSION   "1.1"
 
 #define SB_BAUD      500000
 #define SB_HDR_WRITE 0xE0   /* SYN | WRITE | RST high | reg */

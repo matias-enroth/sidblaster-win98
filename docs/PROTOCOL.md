@@ -1,4 +1,4 @@
-# Notes: SIDBlaster serial protocol and SIDPLAY/Windows' HardSID use
+# Notes: SIDBlaster serial protocol, Network SID Device, and SIDPLAY/Windows' HardSID use
 
 ## SIDBlaster-USB Tic-Tac Edition
 
@@ -44,3 +44,106 @@ The libsidplay1-based player by Michael Schwendt and Adam Lorentzon.
 ## Why the official SIDBlaster DLLs don't load on Windows 9x
 
 The SIDBlaster HardSID-emulation DLLs (including the 2015 build and v518) are linked with subsystem version 6.0 and import functions Windows 98 lacks, such as `EncodePointer`/`DecodePointer`, `GetModuleHandleExW`, `SetFilePointerEx`, SRW locks, and in v518 `GetSystemTimePreciseAsFileTime`. They also bind `FTD2XX.dll` by ordinal from a modern D2XX.
+
+## Network SID Device (`Backend=NetSID`)
+
+The protocol ACID64 uses, specified in `docs/netsiddev.adoc` in
+[acid64c](https://github.com/WilfredC64/acid64c) (V5). Requests are
+`cmd u8, sid u8, len u16 BE, data`; every request gets exactly one
+response (`OK`, `BUSY`, `ERROR` + optional unframed text, `READ`/`VERSION`/
+`COUNT` + 1 byte, `INFO` + model byte + NUL-terminated name). The DLL uses:
+
+- Connect: `GET_VERSION` (2 or later), `GET_CONFIG_COUNT`, `GET_CONFIG_INFO`
+  for each, `TRY_SET_SID_COUNT(1)`, `SET_SID_MODEL`, `SET_CLOCKING`,
+  `TRY_SET_SAMPLING(1)`, `TRY_RESET(0)`, `MUTE` each voice off. The count
+  must come first: JSIDDevice creates its SIDs from the count and model, and
+  drops the client with a NullPointerException otherwise.
+- Play: `TRY_WRITE` (N × `delay u16, reg, val`, at most 127 per packet, so a
+  packet fits one TCP segment even at a 536-byte MSS; see SID-Device below),
+  `TRY_DELAY` (`cycles u16`, nonzero) for leads and long gaps, `TRY_READ`
+  for `$19`–`$1C`.
+- Tune start (`MuteHardSID_Line(1)`): `FLUSH`, `TRY_RESET(0)`, then `MUTE`
+  each voice on;
+  `MuteHardSID_Line(0)`: `MUTE` off. `MUTE`'s flag is 1 to mute, 0 to unmute
+  (as acid64c sends it). Voice 3 (digi) only from V3.
+- Exit: `FLUSH`, `TRY_RESET(0)`.
+
+On `BUSY` the same packet is resent after waiting about as long as it
+plays (2-20 ms): the server only has room once it has played that much.
+Retrying every 2 ms, as acid64c does, cost the K6-2 so much CPU while
+pinned at JSIDDevice's limit (137 round trips a second) that the DLL's
+low-priority logger got no time for minutes and SIDPLAY may have
+stuttered; `BUSY` for over 2 s, a
+500 ms response timeout, or a closed connection takes the link down.
+While it is down the writer drops writes and, as long as SIDPLAY keeps
+writing, reconnects at most every 5 s. Waiting for the next tune start
+isn't enough: SIDPLAY only calls Mute on stop/play, not when changing
+tunes (seen in a Win98 log). Set-up replies get 2 s rather than 500 ms, because a
+JSIDDevice just started took longer than that to answer `SET_SID_MODEL`. After a
+reconnect the register state goes out again, so the tune picks up where
+it is.
+
+### Timing
+
+`WriteToHardSID` stamps each write with `QueryPerformanceCounter` (1,193,182
+Hz on Windows 98, about one tick per C64 cycle). The writer turns stamp
+differences into C64 cycles in 32.32 fixed point, carrying the fraction so
+the total never drifts (under a cycle per hour at Win98's QPC rate). The
+first write, and every tune start, sends `TRY_DELAY`s worth `Lead=` first:
+the server then plays everything that far behind, and anything that holds
+up the DLL or the network for less than that isn't heard. A gap over twice
+the lead re-primes instead of being sent, since the server has run dry by
+then. Within a frame SIDPLAY's writes come microseconds apart; `MinSpacing=`
+can spread them, paying the cycles back from the next delay.
+
+What the client can't see: the server's clock against the PC's (crystals
+differ by up to ~100 ppm, a few ms a minute). A server running slower fills
+up and answers `BUSY`, which only slows the sending; one running faster
+eats into the lead until the next tune start resets it.
+
+### Servers
+
+- **SID-Device** (Wilfred Bos, reSID): reports V5 and two configs (6581,
+  8580). Each `recv()` is handled as exactly one request, so a request must
+  go out in one `send()`, arrive in one TCP segment, and never be
+  pipelined; the DLL keeps packets to 512 bytes and one in flight.
+  `BUSY` above about 200 ms queued (`63*312*10` cycles); after a `FLUSH` or
+  `TRY_SET_SID_COUNT` it waits for about 100 ms of data before it starts
+  playing. `MUTE` is accepted and ignored. `FLUSH` empties the queue and
+  the audio buffer: instant silence.
+- **JSIDPlay2** (Ken Händel): JSIDDevice, main class
+  `server.netsiddev.NetworkSIDDeviceMain` in `jsidplay2-<ver>-ui.jar`
+  (needs Java 21 with the bundled JavaFX jars). From 4.14's bytecode, not
+  yet run: it reports version 4 and frames requests by their length
+  field (NIO buffer), so split or merged segments are fine. It answers
+  BUSY above `Latency=` cycles queued (250000, about 254 ms PAL) and
+  implements MUTE, READ and the other commands the DLL sends. Its
+  `jsiddevice.ini` defaults to `Hostname=127.0.0.1`: tick *Allow external
+  IP connections* in its settings, or the Win98 box can't connect.
+  Measured on an M-series Mac with Java 17: plays at real time (within the
+  0.1% the test could resolve); BUSY from about 250 ms queued, as
+  configured. It needs `TRY_SET_SID_COUNT` before `SET_SID_MODEL`, clock or
+  reset. First session from the Win98 box (SIDPLAY, two minutes of an 8580
+  tune): no drops, but one 213 ms round trip right at the start (a cold
+  JSIDDevice) left its buffer at the 250 ms limit for the whole tune, so
+  every packet was BUSY-paced. Harmless, and a warm server with the same
+  start sequence never went BUSY. `maxlat` also crept from 50 to 130 ms:
+  the Win98 PIT ran about 0.05% fast against the Mac's audio clock, and
+  under BUSY pacing the difference queues up in the DLL until the next
+  tune's FLUSH.
+
+### Why Mute(1) flushes
+
+SIDPLAY calls `MuteHardSID_Line(1)`, writes zeros, then `MuteHardSID_Line(0)`
+at every playback start. Without a flush, a tune change during play would
+put a new lead on top of the old tune's queued tail: under Wine against the
+mock, the lead went from 100 to the server's 200 ms limit and stayed there
+for the whole tune, with about 40 `BUSY` replies a second. Flushing makes
+stop and next-tune immediate and starts each tune exactly one lead behind.
+`FLUSH` alone leaves the emulated SID as it was, so the server would play
+the old tune's held notes through the new lead; `TRY_RESET(0)` right after
+makes the lead silent.
+The DLL keeps what SIDPLAY last wrote to `$00`–`$18` and sends it after a
+flush or a reconnect, so a mute that isn't a tune start loses no register
+state.
+
